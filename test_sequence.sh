@@ -1,110 +1,80 @@
-// test_tree.c — Phase 2 test program
-//
-// Compile and run:
-//   make test_tree
-//   ./test_tree
+#!/usr/bin/env bash
+#
+# test_sequence.sh — End-to-end integration test for PES-VCS
+#
+# Run from the repository root after compiling:
+#   make
+#   ./test_sequence.sh
 
-#include "pes.h"
-#include "tree.h"
-#include <stdio.h>
-#include <string.h>
-#include <assert.h>
-#include <stdlib.h>
+set -euo pipefail
 
-void test_tree_roundtrip(void) {
-    // Build a tree manually
-    Tree original;
-    original.count = 3;
+PES="$(cd "$(dirname "$0")" && pwd)/pes"
+TEST_DIR="$(mktemp -d)"
 
-    original.entries[0].mode = 0100644;
-    memset(original.entries[0].hash.hash, 0xAA, HASH_SIZE);
-    strcpy(original.entries[0].name, "README.md");
-
-    original.entries[1].mode = 0040000;
-    memset(original.entries[1].hash.hash, 0xBB, HASH_SIZE);
-    strcpy(original.entries[1].name, "src");
-
-    original.entries[2].mode = 0100755;
-    memset(original.entries[2].hash.hash, 0xCC, HASH_SIZE);
-    strcpy(original.entries[2].name, "build.sh");
-
-    // Serialize
-    void *data;
-    size_t len;
-    int rc = tree_serialize(&original, &data, &len);
-    assert(rc == 0);
-    assert(data != NULL);
-    assert(len > 0);
-    printf("Serialized tree: %zu bytes\n", len);
-
-    // Parse back
-    Tree parsed;
-    rc = tree_parse(data, len, &parsed);
-    assert(rc == 0);
-    assert(parsed.count == 3);
-
-    // Verify entries are sorted by name (tree_serialize must sort)
-    assert(strcmp(parsed.entries[0].name, "README.md") == 0);
-    assert(strcmp(parsed.entries[1].name, "build.sh") == 0);
-    assert(strcmp(parsed.entries[2].name, "src") == 0);
-
-    // Verify modes preserved
-    assert(parsed.entries[0].mode == 0100644);
-    assert(parsed.entries[1].mode == 0100755);
-    assert(parsed.entries[2].mode == 0040000);
-
-    // Verify hashes preserved
-    assert(memcmp(parsed.entries[0].hash.hash, original.entries[0].hash.hash, HASH_SIZE) == 0);
-
-    free(data);
-
-    printf("PASS: tree serialize/parse roundtrip\n");
+cleanup() {
+    rm -rf "$TEST_DIR"
 }
+trap cleanup EXIT
 
-void test_tree_determinism(void) {
-    // Same entries in different order must produce identical serialization
-    Tree tree_a, tree_b;
-    tree_a.count = 2;
-    tree_b.count = 2;
+cd "$TEST_DIR"
 
-    // tree_a: entries in order z, a
-    tree_a.entries[0].mode = 0100644;
-    memset(tree_a.entries[0].hash.hash, 0x11, HASH_SIZE);
-    strcpy(tree_a.entries[0].name, "z_file.txt");
-    tree_a.entries[1].mode = 0100644;
-    memset(tree_a.entries[1].hash.hash, 0x22, HASH_SIZE);
-    strcpy(tree_a.entries[1].name, "a_file.txt");
+echo "=== PES-VCS Integration Test ==="
+echo ""
 
-    // tree_b: entries in order a, z
-    tree_b.entries[0].mode = 0100644;
-    memset(tree_b.entries[0].hash.hash, 0x22, HASH_SIZE);
-    strcpy(tree_b.entries[0].name, "a_file.txt");
-    tree_b.entries[1].mode = 0100644;
-    memset(tree_b.entries[1].hash.hash, 0x11, HASH_SIZE);
-    strcpy(tree_b.entries[1].name, "z_file.txt");
+# ── Init ───────────────────────────────────────────────────────────────────
+echo "--- Repository Initialization ---"
+$PES init
+[ -d .pes/objects ] && echo "PASS: .pes/objects exists" || echo "FAIL: .pes/objects missing"
+[ -d .pes/refs/heads ] && echo "PASS: .pes/refs/heads exists" || echo "FAIL: .pes/refs/heads missing"
+[ -f .pes/HEAD ] && echo "PASS: .pes/HEAD exists" || echo "FAIL: .pes/HEAD missing"
+echo ""
 
-    void *data_a, *data_b;
-    size_t len_a, len_b;
-    tree_serialize(&tree_a, &data_a, &len_a);
-    tree_serialize(&tree_b, &data_b, &len_b);
+# ── Add and Status ─────────────────────────────────────────────────────────
+echo "--- Staging Files ---"
+echo "version 1" > file.txt
+echo "hello world" > hello.txt
+$PES add file.txt hello.txt
+echo "Status after add:"
+$PES status
+echo ""
 
-    assert(len_a == len_b);
-    assert(memcmp(data_a, data_b, len_a) == 0);
+# ── First Commit ───────────────────────────────────────────────────────────
+echo "--- First Commit ---"
+$PES commit -m "Initial commit"
+echo ""
+echo "Log after first commit:"
+$PES log
+echo ""
 
-    free(data_a);
-    free(data_b);
+# ── Modify and Recommit ───────────────────────────────────────────────────
+echo "--- Second Commit ---"
+echo "version 2" >> file.txt
+$PES add file.txt
+$PES commit -m "Update file.txt"
+echo ""
 
-    printf("PASS: tree deterministic serialization\n");
-}
+# ── Third Commit ──────────────────────────────────────────────────────────
+echo "--- Third Commit ---"
+echo "goodbye" > bye.txt
+$PES add bye.txt
+$PES commit -m "Add farewell"
+echo ""
 
-int main(void) {
-    int rc __attribute__((unused));
-    rc = system("rm -rf .pes");
-    rc = system("mkdir -p .pes/objects .pes/refs/heads");
+echo "--- Full History ---"
+$PES log
+echo ""
 
-    test_tree_roundtrip();
-    test_tree_determinism();
+echo "--- Reference Chain ---"
+echo "HEAD:"
+cat .pes/HEAD
+echo "refs/heads/main:"
+cat .pes/refs/heads/main
+echo ""
 
-    printf("\nAll Phase 2 tests passed.\n");
-    return 0;
-}
+echo "--- Object Store ---"
+echo "Objects created:"
+find .pes/objects -type f | wc -l
+find .pes/objects -type f | sort
+echo ""
+
+echo "=== All integration tests completed ==="
